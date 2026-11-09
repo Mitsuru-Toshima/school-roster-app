@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#1e3a8a">
+  <title>（日専校）学籍マネージャー - School Roster</title>
+  <script type="module" crossorigin src="/assets/index-DkWQ3QU2.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-97hKHOHw.css">
+</head>
+<body>
+  <!-- ヘッダー -->
+  <header>
+    <div class="logo">
+      <h2>（日専校）学籍マネージャー <span>- School Roster</span></h2>
+    </div>
+    <div class="user-panel">
+      <span id="userRoleBadge" class="role-badge">管理者</span>
+      <span id="userStatus" class="user-status">mitsuru.toshima@hitachi-tech.ac.jp</span>
+      
+      <!-- イマーシブ（全画面表示）トグルボタン -->
+      <button id="immersiveBtn" class="btn btn-immersive" title="全画面・イマーシブ表示切替">⛶ 全画面</button>
+      
+      <!-- 操作パネル折りたたみトグル（モバイル・タブレット用） -->
+      <button id="toggleControlsBtn" class="btn btn-toggle-panel" title="設定パネル表示・非表示切替">⚙️ パネル</button>
+      
+      <button id="btnAssignAdmin" class="btn btn-sm btn-light" style="display:none;" title="特権管理者が他の教員を管理者に指名">👑 管理者指名</button>
+      <button id="authBtn" class="btn btn-outline">ログアウト</button>
+      <button id="printBtn" class="btn btn-print">🖨️ A4印刷・PDF</button>
+    </div>
+  </header>
+
+  <!-- 管理者用インポート＆設定バー（折りたたみ可能） -->
+  <section id="adminBar" class="admin-panel collapsible-section no-print">
+    <div class="admin-header">
+      <div class="admin-title">🛠️ データ管理・名簿・写真インポート</div>
+      <button class="btn-icon-collapse" onclick="toggleSection('adminGrid')">▼</button>
+    </div>
+    <div id="adminGrid" class="admin-grid">
+      <div class="input-card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <label>⓪ 教員・職員名簿 (CSV / Excel)</label>
+          <div class="btn-group-mini">
+            <button id="btnDownloadTeacherTpl" class="btn-link" title="教員登録用の雛形CSVをダウンロード">📥 雛形</button>
+            <button id="btnDownloadTeacherList" class="btn-link" title="現在登録されている教員一覧をCSV出力">📤 教員リスト</button>
+            <button id="btnClearTeacher" class="btn-link" style="color:#ef4444;" title="登録教員リストをクリア">🗑️ クリア</button>
+          </div>
+        </div>
+        <input type="file" id="teacherFile" accept=".csv, .xlsx, .xls">
+      </div>
+      <div class="input-card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <label>① 生徒名簿 (CSV / Excel)</label>
+          <div class="btn-group-mini">
+            <button id="btnDownloadStudentTpl" class="btn-link" title="生徒名簿の雛形CSVをダウンロード">📥 雛形</button>
+            <button id="btnDownloadStudentList" class="btn-link" title="現在読み込まれている生徒名簿をCSV出力">📤 ユーザーリスト</button>
+            <button id="btnClearStudent" class="btn-link" style="color:#ef4444;" title="生徒名簿データをクリア">🗑️ クリア</button>
+          </div>
+        </div>
+        <input type="file" id="rosterFile" accept=".csv, .xlsx, .xls">
+      </div>
+
+      <div class="input-card">
+        <label>② 生徒顔写真 一括登録（座席・名簿・証明写真・寮プレート共通）</label>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <input type="file" id="photoZipFile" accept=".zip" style="display:none;">
+          <button class="btn btn-sm btn-light" onclick="document.getElementById('photoZipFile').click()">📦 写真ZIP選択</button>
+          <input type="file" id="photoDir" webkitdirectory directory multiple accept="image/*" style="display:none;">
+          <button class="btn btn-sm btn-light" onclick="document.getElementById('photoDir').click()">📁 フォルダ選択</button>
+          <span id="photoCount" class="badge">写真: 0枚</span>
+        </div>
+      </div>
+
+      <div class="input-card">
+        <label>③ 証明写真専用 写真登録（※別写真にしたい場合のみ。通常は②の写真が自動適用）</label>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <input type="file" id="idPhotoZipFile" accept=".zip" style="display:none;">
+          <button class="btn btn-sm btn-light" onclick="document.getElementById('idPhotoZipFile').click()">📦 専用ZIP選択</button>
+          <input type="file" id="idPhotoDir" webkitdirectory directory multiple accept="image/*" style="display:none;">
+          <button class="btn btn-sm btn-light" onclick="document.getElementById('idPhotoDir').click()">📁 フォルダ選択</button>
+          <span id="idPhotoCount" class="badge">専用: 0枚</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 帳票種別ナビゲーションタブ（横スクロール対応） -->
+  <nav class="tabs no-print" id="mainTabsNav">
+    <button class="tab-btn active" data-tab="seat">座席表（出席簿用）</button>
+    <button class="tab-btn" data-tab="attendance">生徒名簿（出席簿）</button>
+    <button class="tab-btn" data-tab="rollcall">寮生点呼簿（週間記録）</button>
+    <button class="tab-btn" data-tab="plate_locker">ロッカー用ネームプレート</button>
+    <button class="tab-btn" data-tab="plate_dorm">ネームプレート（寮 4×3cm）</button>
+    <button class="tab-btn" data-tab="photo">証明写真印刷</button>
+    <button class="tab-btn" data-tab="diaries">各種日誌（日直・宿直・保健）</button>
+    <button class="tab-btn" data-tab="origin">出身地別名簿</button>
+  </nav>
+
+  <!-- 操作コントロールコンテナ（イマーシブモード時に一括隠蔽可能） -->
+  <div id="controlsContainer">
+    <!-- ① 座席表コントロール -->
+    <div id="seatControls" class="seat-control-bar no-print">
+      <div class="control-row">
+        <div class="control-item">
+          <label>教室プリセット選択</label>
+          <select id="classroomPresetSelect" style="min-width:230px; font-weight:bold;"></select>
+        </div>
+
+        <div class="control-item">
+          <label>編成モード</label>
+          <select id="seatGroupingMode">
+            <option value="single">単一クラス</option>
+            <option value="combined">合同クラス</option>
+            <option value="club">部活動別</option>
+            <option value="committee">委員会別</option>
+            <option value="free">学年フリー（全校）</option>
+          </select>
+        </div>
+
+        <div class="control-item" id="singleClassBox">
+          <label>対象クラス</label>
+          <select id="seatClassSelect"></select>
+        </div>
+
+        <div class="control-item" id="combinedClassBox" style="display:none;">
+          <label>合同対象（複数選択可）</label>
+          <select id="seatCombinedSelect" multiple size="3" style="min-width:140px;"></select>
+        </div>
+
+        <div class="control-item" id="clubSelectBox" style="display:none;">
+          <label>部活動選択</label>
+          <select id="seatClubSelect"></select>
+        </div>
+
+        <div class="control-item" id="commSelectBox" style="display:none;">
+          <label>委員会選択</label>
+          <select id="seatCommSelect"></select>
+        </div>
+
+        <div class="control-item" id="seatColsRowsBox">
+          <label>席数 (列 × 行)</label>
+          <div style="display:flex; align-items:center; gap:4px;">
+            <input type="number" id="seatCols" value="5" min="1" max="12" style="width:48px;"> 列 ×
+            <input type="number" id="seatRows" value="5" min="1" max="15" style="width:48px;"> 行
+            <span id="totalSeatsLabel" style="font-size:11px; color:#666;">(計25席)</span>
+          </div>
+        </div>
+
+        <div class="control-item">
+          <button id="btnRefreshSeat" class="btn btn-primary" style="margin-top:auto;">🔄 画面更新・反映</button>
+        </div>
+        <div class="control-item">
+          <button class="btn btn-print" onclick="window.print()" style="margin-top:auto;">🖨️ A4印刷・PDF出力</button>
+        </div>
+      </div>
+
+      <div class="control-row seat-actions">
+        <div class="control-item">
+          <label>並び順プリセット</label>
+          <select id="seatOrderPattern">
+            <option value="podium_col" selected>教卓側から昇順（教卓側から見て右側から縦に出席番号順）</option>
+            <option value="podium_row_lr">教卓側から横並び（最前列 左→右）</option>
+            <option value="podium_row_rl">教卓側から横並び（最前列 右→左）</option>
+            <option value="back_row_lr">後方から昇順（左上から順）</option>
+            <option value="desc">降順配置</option>
+          </select>
+        </div>
+        <button id="btnSortRandom" class="btn btn-sm btn-light">🎲 シャッフル</button>
+        <button id="btnClearSeats" class="btn btn-sm btn-danger-outline">席をクリア</button>
+        
+        <!-- モバイル・タブレット用拡大縮小コントロール -->
+        <div class="zoom-controls">
+          <span style="font-size:11px; color:#666;">表示拡大率:</span>
+          <button id="btnZoomOut" class="btn btn-sm btn-light" title="縮小">🔍 -</button>
+          <span id="zoomLevelLabel" style="font-size:11px; font-weight:bold; min-width:36px; text-align:center;">100%</span>
+          <button id="btnZoomIn" class="btn btn-sm btn-light" title="拡大">🔍 +</button>
+          <button id="btnZoomReset" class="btn btn-sm btn-light" title="リセット">100%</button>
+        </div>
+
+        <span class="seat-instruction">💡 空席は自動非表示。写真下枠は極小表示。スマホ・タブレットではタップで席を入替可能</span>
+      </div>
+    </div>
+
+    <!-- ② 寮生点呼簿コントロール -->
+    <div id="rollcallControls" class="seat-control-bar no-print" style="display:none;">
+      <div class="control-row" style="align-items:center; flex-wrap:wrap; gap:10px;">
+        <div class="control-item">
+          <label>寮・フロア選択（絞り込み・ソート）</label>
+          <select id="dormFilterSelect" style="font-weight:bold;">
+            <option value="ALL">全寮生 (1寮・2寮・3寮 全体)</option>
+            <option value="1-1">1寮 1階</option>
+            <option value="1-2">1寮 2階</option>
+            <option value="2-1">2寮 1階</option>
+            <option value="2-2">2寮 2階</option>
+            <option value="2-3">2寮 3階</option>
+            <option value="2-4">2寮 4階</option>
+            <option value="3-2">3寮 2階</option>
+            <option value="3-3">3寮 3階</option>
+            <option value="3-4">3寮 4階</option>
+          </select>
+        </div>
+
+        <div class="control-item">
+          <label>対象週（スクロール切替）</label>
+          <div style="display:flex; align-items:center; gap:4px;">
+            <button id="btnPrevWeek" class="btn btn-sm btn-light">◀ 前週</button>
+            <input type="date" id="rollcallWeekDate">
+            <button id="btnNextWeek" class="btn btn-sm btn-light">次週 ▶</button>
+          </div>
+        </div>
+
+        <div class="control-item">
+          <button id="btnPrintFloorRollCall" class="btn btn-print" style="margin-top:auto;">🖨️ フロア単位でA4印刷・PDF出力</button>
+        </div>
+        <div class="control-item">
+          <button id="btnExportRollCallCSV" class="btn btn-sm btn-light" style="margin-top:auto;">📤 点呼集計CSV出力</button>
+        </div>
+        <div class="control-item">
+          <button id="btnSaveRollCall" class="btn btn-sm btn-primary" style="margin-top:auto;">💾 点呼結果を保存</button>
+        </div>
+        <div class="dashboard-badge" id="absentSummaryBadge">不在者: 0名</div>
+      </div>
+
+      <!-- 不在者ダッシュボード -->
+      <div id="absentDashboardBox" class="absent-dashboard-panel">
+        <strong>【点呼 不在・特記生徒ダッシュボード】</strong>
+        <div id="absentListContainer" class="absent-chips-container">
+          <span style="color:#666; font-size:12px;">現在、不在者として登録された生徒はいません。</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ 汎用コントロール（ロッカー・証明写真・名簿用） -->
+    <div id="generalControls" class="general-control-bar no-print" style="display:none;">
+      <div class="control-item" id="gradeFilterBox">
+        <label>学年絞り込み</label>
+        <select id="generalGradeFilter">
+          <option value="ALL">全学年</option>
+          <option value="1">１年生</option>
+          <option value="2">２年生</option>
+          <option value="3">３年生</option>
+        </select>
+      </div>
+
+      <div class="control-item" id="classFilterBox">
+        <label>対象クラス</label>
+        <select id="generalClassFilter">
+          <option value="ALL">全クラス</option>
+        </select>
+      </div>
+
+      <div class="control-item" id="sizeSelectorBox">
+        <label>規格寸法選択</label>
+        <select id="sizeSelector"></select>
+      </div>
+      <div class="control-item" id="photoAdjustBox" style="display:none;">
+        <label>顔写真微調整 (倍率 / 上下)</label>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <input type="range" id="photoScaleSlider" min="0.8" max="1.6" step="0.05" value="1.0" style="width:75px;" title="写真倍率">
+          <span id="photoScaleVal" style="font-size:11px; min-width:32px;">100%</span>
+          <input type="range" id="photoOffsetYSlider" min="0" max="60" step="2" value="15" style="width:70px;" title="顔位置(上下)">
+          <span id="photoOffsetYVal" style="font-size:11px; min-width:28px;">15%</span>
+        </div>
+      </div>
+
+      <button id="btnRefreshGeneral" class="btn btn-sm btn-primary">🔄 再描画</button>
+      <button class="btn btn-print" onclick="window.print()">🖨️ A4印刷・PDF出力</button>
+    </div>
+
+    <!-- ④ 日誌用コントロール -->
+    <div id="diaryControls" class="seat-control-bar no-print" style="display:none;">
+      <div class="control-row" style="align-items:center;">
+        <button class="btn btn-sm btn-light diary-subtab active" onclick="switchDiaryType('day')">日直日誌 (学校休日)</button>
+        <button class="btn btn-sm btn-light diary-subtab" onclick="switchDiaryType('night')">宿直日誌 (毎日)</button>
+        <button class="btn btn-sm btn-light diary-subtab" onclick="switchDiaryType('health')">保健室日誌 (平日)</button>
+
+        <div class="control-item" style="margin-left:14px;">
+          <label>過去の日誌を閲覧</label>
+          <select id="diaryHistorySelect" onchange="loadPastDiary(this.value)">
+            <option value="">-- 保存済み履歴から選択 --</option>
+          </select>
+        </div>
+
+        <div class="control-item">
+          <label>まとめ期間選択</label>
+          <select id="diarySummaryPeriod" onchange="renderPreview()">
+            <option value="single">単日（当日分）</option>
+            <option value="week">週間まとめ</option>
+            <option value="month">月間まとめ</option>
+            <option value="quarter">4半期まとめ</option>
+            <option value="half">半期まとめ</option>
+            <option value="year">年間まとめ</option>
+          </select>
+        </div>
+
+        <button id="btnExportDiaryCSV" class="btn btn-sm btn-light">📤 日誌データCSV出力</button>
+        <button id="btnSaveDiary" class="btn btn-sm btn-primary">💾 日誌を保存</button>
+        <button class="btn btn-print" onclick="window.print()" style="margin-left:auto;">🖨️ 日誌 A4印刷・PDF出力</button>
+      </div>
+        <!-- ⑤ 出身地別名簿用コントロール -->
+    <div id="originControls" class="general-control-bar no-print" style="display:none;">
+      <button id="btnExportOriginCSV" class="btn btn-sm btn-light">📤 スプレッドシート用CSV出力</button>
+      <button class="btn btn-print" onclick="window.print()">🖨️ 名簿PDF・A4印刷</button>
+    </div>
+  </div>
+
+  <!-- フローティング・イマーシブ復帰ボタン -->
+  <button id="floatingImmersiveExitBtn" class="floating-immersive-btn" title="イマーシブモード終了 / コントロール復帰" style="display:none;">
+    ✕ 画面復帰
+  </button>
+
+  <!-- 印刷＆プレビューエリア -->
+  <main id="preview-area">
+    <div id="previewZoomWrapper" class="preview-zoom-wrapper">
+      <div class="empty-state">
+        <p>生徒名簿ファイル（CSV / Excel）を上部からアップロードしてください。</p>
+      </div>
+    </div>
+  </main>
+
+  <!-- 教員専用アクセス制限ロック画面 -->
+  <div id="authLockOverlay" style="display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(15,23,42,0.95); z-index:99999; flex-direction:column; align-items:center; justify-content:center; color:white; text-align:center; padding:20px;">
+    <h2 style="font-size:22px; margin-bottom:12px;">🔒 教員専用アクセス制限</h2>
+    <p id="authLockMsg" style="color:#cbd5e1; max-width:480px; margin-bottom:20px; font-size:14px; line-height:1.6;">
+      本システムは登録された教員アカウント（Google SSO）のみご利用いただけます。<br>
+      学校のGoogleアカウントでログインしてください。
+    </p>
+    <button id="lockLoginBtn" class="btn btn-primary" style="padding:10px 24px; font-size:14px;">Googleアカウントでログイン</button>
+  </div>
+
+</body>
+</html>

@@ -12,7 +12,49 @@ import {
 import { collection, doc, writeBatch, getDocs, setDoc, getDoc } from 'firebase/firestore';
 import { ref, uploadBytes } from 'firebase/storage';
 
+
+// 茨城県庁（https://www.pref.ibaraki.jp/towns/）公式掲載順マスター（44市町村）
+const IBARAKI_MUNICIPALITIES_ORDER = [
+  // 県北地域
+  "日立市", "常陸太田市", "高萩市", "北茨城市", "常陸大宮市", "那珂市", "大子町", "東海村",
+  // 県央地域
+  "水戸市", "笠間市", "ひたちなか市", "茨城町", "大洗町", "城里町", "小美玉市",
+  // 鹿行地域
+  "鹿嶋市", "潮来市", "神栖市", "行方市", "鉾田市",
+  // 県南地域
+  "土浦市", "石岡市", "龍ケ崎市", "取手市", "牛久市", "つくば市", "美浦村", "阿見町", "河内町", "かすみがうら市", "稲敷市", "つくばみらい市", "守谷市", "利根町",
+  // 県西地域
+  "古河市", "結城市", "下妻市", "常総市", "筑西市", "坂東市", "桜川市", "八千代町", "五霞町", "境町"
+];
+
+// JIS都道府県コード順（茨城県を先頭に固定）
+const PREFECTURES_JIS_ORDER = [
+  "茨城県",
+  "北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県",
+  "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県", "新潟県", "富山県",
+  "石川県", "福井県", "山梨県", "長野県", "岐阜県", "静岡県", "愛知県", "三重県",
+  "滋賀県", "京都府", "大阪府", "兵庫県", "奈良県", "和歌山県", "鳥取県", "島根県",
+  "岡山県", "広島県", "山口県", "徳島県", "香川県", "愛媛県", "高知県", "福岡県",
+  "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県"
+];
+
+
+function downloadBomCsv(filename, content) {
+  const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
+  const blob = new Blob([bom, content], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
 const SUPER_ADMIN_EMAIL = "mitsuru.toshima@hitachi-tech.ac.jp";
+let photoScale = 1.0;
+let photoOffsetY = 15;
+let adminTeachers = new Set([SUPER_ADMIN_EMAIL.toLowerCase()]);
 
 // 部活動名 フルネームマッピング
 const CLUB_FULL_NAMES = {
@@ -71,7 +113,41 @@ const LOCKER_PLATE_SIZES = [
   { name: "ロッカー用 3.5 × 6.8 cm", w: 68, h: 35, font: "26pt" }
 ];
 
-const PRESET_CLASSES = ["1-1", "1-2", "1-3", "1E", "1M", "1W", "2E", "2M", "2W", "3E1", "3E2", "3MW"];
+const CLASS_TEACHERS = {
+  "1-1": "遠島　充",
+  "1-2": "小室　尚子",
+  "1-3": "竹井　勇佑",
+  "1E": "遠島　充",
+  "1M": "小室　尚子",
+  "1W": "竹井　勇佑",
+  "2E": "佐久間　健",
+  "2M": "工藤　雄大",
+  "2W": "川崎　清勝",
+  "3E1": "齊藤　慎",
+  "3E2": "目良　優也",
+  "3M": "金澤　章",
+  "3W": "金澤　章",
+  "3MW": "金澤　章"
+};
+
+const CLASS_DISPLAY_NAMES = {
+  "1-1": "１年総合科１組 (1-1)",
+  "1-2": "１年総合科２組 (1-2)",
+  "1-3": "１年総合科３組 (1-3)",
+  "1E": "１年電気科 (1E)",
+  "1M": "１年機械科 (1M)",
+  "1W": "１年溶接科 (1W)",
+  "2E": "２年電気科 (2E)",
+  "2M": "２年機械科 (2M)",
+  "2W": "２年溶接科 (2W)",
+  "3E1": "３年電気科１組 (3E1)",
+  "3E2": "３年電気科２組 (3E2)",
+  "3M": "３年機械科 (3M)",
+  "3W": "３年溶接科 (3W)",
+  "3MW": "３年機械・溶接科合同 (3MW)"
+};
+
+const PRESET_CLASSES = ["1-1", "1-2", "1-3", "2E", "2M", "2W", "3E1", "3E2", "3MW", "3M", "3W"];
 
 const PRESET_CLASSROOMS = [
   { name: "23番教室（1-1・1E）", defaultClass: "1-1", cols: 5, rows: 5 },
@@ -101,6 +177,52 @@ const PRESET_CLASSROOMS = [
 ];
 
 let students = [];
+
+// ================= クラウド（Firestore）自動保存＆自動復元 =================
+async function saveRosterToCloud() {
+  if (!db || students.length === 0) return;
+  try {
+    const docRef = doc(db, 'system_data', 'roster_master');
+    await setDoc(docRef, {
+      students: students,
+      seatAssignments: seatAssignments,
+      updatedAt: new Date().toISOString()
+    });
+    console.log("生徒名簿および座席データをクラウドに自動保存しました。");
+  } catch (err) {
+    console.warn("クラウド自動保存エラー:", err);
+  }
+}
+
+async function loadRosterFromCloud() {
+  if (!db) return;
+  try {
+    const docRef = doc(db, 'system_data', 'roster_master');
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data.students && data.students.length > 0) {
+        students = data.students;
+        if (data.seatAssignments && data.seatAssignments.length > 0) {
+          seatAssignments = data.seatAssignments;
+        } else {
+          initSeatAssignments();
+        }
+        const badge = document.getElementById('rosterCount');
+        if (badge) {
+          badge.innerText = `生徒: ${students.length}名 (保存済)`;
+          badge.classList.add('badge-ok');
+        }
+        updateFilterSelectors();
+        renderPreview();
+        console.log("クラウドから名簿データを復元しました（生徒: " + students.length + "名）");
+      }
+    }
+  } catch (err) {
+    console.warn("クラウド復元エラー:", err);
+  }
+}
+
 let staffList = [];
 let photoStore = {};
 let idPhotoStore = {};
@@ -126,9 +248,9 @@ let currentDiary = {
     club: "なし",
     notice: "特になし",
     special: "英検三級試験（茨城キリスト）希望者のみ",
-    isolationStudentId: "",
-    isolationTemp: "",
-    isolationReason: "足首捻挫のため、松葉杖使用。"
+    isolatedStudents: [
+      { studentId: "", location: "隔離", temp: "37.2", reason: "足首捻挫のため、松葉杖使用。経過観察。" }
+    ]
   },
   night: {
     date: "2026-11-06",
@@ -141,9 +263,11 @@ let currentDiary = {
     rollcallStatus: "（夜）20:45 異常なし ・ （朝）6:45 異常なし",
     patrols: ["20:00～20:30", "21:45～22:10", "", "", ""],
     club: "有り",
-    officeDuty: "3-401（机）（橋本）（興野）",
+    officeRoom: "3-401",
+    officeDuty: "（机）（橋本）（興野）",
     emergencyStay: "無し",
-    outReport: "20名帰寮報告有り",
+    outCount: 20,
+    outReport: "特記事項なし。時間通り全員帰寮完了。",
     repair: "無し",
     leftFood: "無し",
     bus: "無し",
@@ -186,7 +310,7 @@ document.getElementById('rosterFile').addEventListener('change', (e) => {
       header: false,
       skipEmptyLines: false,
       complete: (res) => {
-        students = parseStrict209Students(res.data);
+        students = parseFlexibleRoster(res.data);
         onRosterLoaded();
       }
     });
@@ -195,12 +319,197 @@ document.getElementById('rosterFile').addEventListener('change', (e) => {
     reader.onload = (evt) => {
       const wb = XLSX.read(new Uint8Array(evt.target.result), { type: 'array' });
       const rawRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
-      students = parseStrict209Students(rawRows);
+      students = parseFlexibleRoster(rawRows);
       onRosterLoaded();
     };
     reader.readAsArrayBuffer(file);
   }
 });
+
+
+// ================= ヘボン式ローマ字変換（英字フォールバック用） =================
+
+function normalizeClassName(raw) {
+  if (!raw) return "1-1";
+  let s = String(raw).trim().toUpperCase();
+  if (s === "1G1" || s === "1-1" || s === "1E") return "1-1";
+  if (s === "1G2" || s === "1-2" || s === "1M") return "1-2";
+  if (s === "1G3" || s === "1-3" || s === "1W") return "1-3";
+  if (s === "2E") return "2E";
+  if (s === "2M") return "2M";
+  if (s === "2W") return "2W";
+  if (s.includes("3.00E+01") || s.includes("3E1") || s.includes("3.0E+01") || s === "3E-1") return "3E1";
+  if (s.includes("3.00E+02") || s.includes("3E2") || s.includes("3.0E+02") || s === "3E-2") return "3E2";
+  if (s === "3M") return "3M";
+  if (s === "3W") return "3W";
+  if (s === "3MW") return "3MW";
+  return s;
+}
+
+function parseFlexibleRoster(rawRows) {
+  if (!rawRows || rawRows.length === 0) return [];
+  const cleanRows = rawRows.filter(r => r && r.length > 0 && r.some(c => String(c || "").trim() !== ""));
+  
+  // Find header row if exists
+  let headerRowIdx = -1;
+  const colIndexMap = {};
+
+  for (let i = 0; i < Math.min(cleanRows.length, 10); i++) {
+    const row = cleanRows[i].map(c => String(c || "").replace(/[\r\n]+/g, "").trim());
+    if (row.some(c => c.includes("氏名") || c.includes("氏名番号") || c.includes("学籍番号") || c.includes("生徒番号"))) {
+      headerRowIdx = i;
+      row.forEach((h, colIdx) => {
+        if (/氏名番号|学籍番号|生徒番号|コード/.test(h)) colIndexMap.code = colIdx;
+        else if (h === "氏名" || (h.includes("氏名") && !h.includes("ふりがな") && !h.includes("ローマ字") && !h.includes("保護者"))) colIndexMap.name = colIdx;
+        else if (/ふりがな|フリガナ|かな/.test(h) && !h.includes("保護者")) colIndexMap.kana = colIdx;
+        else if (/クラス|組/.test(h)) colIndexMap.cls = colIdx;
+        else if (/出席番号|番号/.test(h) && !h.includes("氏名番号") && !h.includes("携帯") && !h.includes("郵便")) colIndexMap.no = colIdx;
+        else if (/部活/.test(h) && !h.includes("顧問")) colIndexMap.club = colIdx;
+        else if (/役職|委員会/.test(h)) colIndexMap.committee = colIdx;
+        else if (/ローマ字|英語|英字/.test(h) && !h.includes("名（ローマ字）")) colIndexMap.romaji = colIdx;
+        else if (h.includes("名（ローマ字）") && colIndexMap.romajiFirst === undefined) colIndexMap.romajiFirst = colIdx;
+        else if (/寮部屋|部屋/.test(h)) colIndexMap.room = colIdx;
+        else if (/住所（統合）|住所|帰省先/.test(h)) colIndexMap.address = colIdx;
+        else if (/出身中学校.*市町村|出身.*市町村/.test(h)) colIndexMap.jhCity = colIdx;
+        else if (/出身.*学校名|出身中学|中学名/.test(h)) colIndexMap.jhName = colIdx;
+      });
+      break;
+    }
+  }
+
+  const resultList = [];
+  const rowsToProcess = (headerRowIdx !== -1) ? cleanRows.slice(headerRowIdx + 1) : cleanRows;
+
+  rowsToProcess.forEach((r, idx) => {
+    // Check if row has valid student code or name
+    let code = colIndexMap.code !== undefined ? String(r[colIndexMap.code] || "").trim() : "";
+    if (!code) {
+      for (let cell of r) {
+        const val = String(cell || "").trim();
+        if (/^202[4-6]\d{3}$/.test(val)) { code = val; break; }
+      }
+    }
+    if (!code) code = `2026${String(idx + 1).padStart(3, '0')}`;
+
+    let name = colIndexMap.name !== undefined ? String(r[colIndexMap.name] || "").trim() : "";
+    if (!name) {
+      for (let cell of r) {
+        const val = String(cell || "").trim();
+        if (val.length >= 2 && !/^\d+$/.test(val) && !val.includes("@") && !val.includes("組") && !val.includes("科")) {
+          name = val;
+          break;
+        }
+      }
+    }
+    if (!name || name === "氏名" || name === "氏名番号") return;
+
+    let kana = colIndexMap.kana !== undefined ? String(r[colIndexMap.kana] || "").trim() : "";
+    let rawCls = colIndexMap.cls !== undefined ? String(r[colIndexMap.cls] || "").trim() : "";
+    let cls = normalizeClassName(rawCls);
+
+    let noVal = colIndexMap.no !== undefined ? parseInt(r[colIndexMap.no]) : (idx + 1);
+    if (isNaN(noVal) || noVal <= 0) noVal = idx + 1;
+
+    let club = colIndexMap.club !== undefined ? getFullClubName(String(r[colIndexMap.club] || "").trim()) : "-";
+    let committee = colIndexMap.committee !== undefined ? String(r[colIndexMap.committee] || "").trim() : "-";
+    let address = colIndexMap.address !== undefined ? String(r[colIndexMap.address] || "").trim() : "";
+    let room = colIndexMap.room !== undefined ? String(r[colIndexMap.room] || "").trim() : "-";
+
+    // Combine junior high school name
+    let jhCity = colIndexMap.jhCity !== undefined ? String(r[colIndexMap.jhCity] || "").trim() : "";
+    let jhName = colIndexMap.jhName !== undefined ? String(r[colIndexMap.jhName] || "").trim() : "";
+    let juniorHigh = "";
+    if (jhCity && jhName) {
+      juniorHigh = `${jhCity}${jhName.endsWith("中") || jhName.endsWith("中学校") || jhName.endsWith("校") ? jhName : jhName + "中"}`;
+    } else if (jhName) {
+      juniorHigh = jhName;
+    } else if (jhCity) {
+      juniorHigh = jhCity;
+    }
+
+    // Romaji
+    let romaji = colIndexMap.romaji !== undefined ? String(r[colIndexMap.romaji] || "").trim() : "";
+    if (!romaji && kana) {
+      romaji = kanaToRomaji(kana);
+    }
+
+    resultList.push({
+      id: `${cls}_${String(noVal).padStart(2, '0')}`,
+      studentCode: code,
+      name: name.replace(/[\s　]+/g, " "),
+      cleanName: name.replace(/[\s　]+/g, ""),
+      kana: kana,
+      romaji: romaji,
+      cls: cls,
+      no: noVal,
+      club: club,
+      committee: committee,
+      address: address,
+      juniorHigh: juniorHigh,
+      room: room
+    });
+  });
+
+  return resultList.length > 0 ? resultList : parseStrict209Students(rawRows);
+}
+
+
+function kanaToRomaji(kana) {
+  if (!kana) return '';
+  const map = {
+    'あ': 'a', 'い': 'i', 'う': 'u', 'え': 'e', 'お': 'o',
+    'か': 'ka', 'き': 'ki', 'く': 'ku', 'け': 'ke', 'こ': 'ko',
+    'さ': 'sa', 'し': 'shi', 'す': 'su', 'せ': 'se', 'そ': 'so',
+    'た': 'ta', 'ち': 'chi', 'つ': 'tsu', 'て': 'te', 'と': 'to',
+    'な': 'na', 'に': 'ni', 'ぬ': 'nu', 'ね': 'ne', 'の': 'no',
+    'は': 'ha', 'ひ': 'hi', 'ふ': 'fu', 'へ': 'he', 'ほ': 'ho',
+    'ま': 'ma', 'み': 'mi', 'む': 'mu', 'め': 'me', 'も': 'mo',
+    'や': 'ya', 'ゆ': 'yu', 'よ': 'yo',
+    'ら': 'ra', 'り': 'ri', 'る': 'ru', 'れ': 're', 'ろ': 'ro',
+    'わ': 'wa', 'を': 'o', 'ん': 'n',
+    'が': 'ga', 'ぎ': 'gi', 'ぐ': 'gu', 'げ': 'ge', 'ご': 'go',
+    'ざ': 'za', 'じ': 'ji', 'ず': 'zu', 'ぜ': 'ze', 'ぞ': 'zo',
+    'だ': 'da', 'ぢ': 'ji', 'づ': 'zu', 'で': 'de', 'ど': 'do',
+    'ば': 'ba', 'び': 'bi', 'ぶ': 'bu', 'べ': 'be', 'ぼ': 'bo',
+    'ぱ': 'pa', 'ぴ': 'pi', 'ぷ': 'pu', 'ぺ': 'pe', 'ぽ': 'po',
+    'きゃ': 'kya', 'きゅ': 'kyu', 'きょ': 'kyo',
+    'しゃ': 'sha', 'しゅ': 'shu', 'しょ': 'sho',
+    'ちゃ': 'cha', 'ちゅ': 'chu', 'ちょ': 'cho',
+    'にゃ': 'nya', 'にゅ': 'nyu', 'にょ': 'nyo',
+    'ひゃ': 'hya', 'ひゅ': 'hyu', 'ひょ': 'hyo',
+    'みゃ': 'mya', 'みゅ': 'myu', 'みょ': 'myo',
+    'りゃ': 'rya', 'りゅ': 'ryu', 'りょ': 'ryo',
+    'ぎゃ': 'gya', 'ぎゅ': 'gyu', 'ぎょ': 'gyo',
+    'じゃ': 'ja', 'じゅ': 'ju', 'じょ': 'jo',
+    'びゃ': 'bya', 'びゅ': 'byu', 'びょ': 'byo',
+    'ぴゃ': 'pya', 'ぴゅ': 'pyu', 'ぴょ': 'pyo'
+  };
+
+  const parts = kana.trim().split(/[\s　]+/);
+  return parts.map(part => {
+    let res = '';
+    let i = 0;
+    while (i < part.length) {
+      if (i + 1 < part.length && map[part.slice(i, i + 2)]) {
+        res += map[part.slice(i, i + 2)];
+        i += 2;
+      } else if (part[i] === 'っ' && i + 1 < part.length) {
+        const next = map[part.slice(i + 1, i + 3)] || map[part[i + 1]] || '';
+        if (next) res += next[0];
+        i += 1;
+      } else if (map[part[i]]) {
+        res += map[part[i]];
+        i += 1;
+      } else if (part[i] === 'ー') {
+        i += 1;
+      } else {
+        res += part[i];
+        i += 1;
+      }
+    }
+    return res.charAt(0).toUpperCase() + res.slice(1);
+  }).join('\n');
+}
 
 function parseStrict209Students(rawRows) {
   if (!rawRows || rawRows.length === 0) return [];
@@ -233,6 +542,7 @@ function parseStrict209Students(rawRows) {
         studentCode: code,
         name: "",
         cleanName: "",
+        romaji: "",
         no: 0,
         cls: "",
         kana: "",
@@ -257,7 +567,29 @@ function parseStrict209Students(rawRows) {
       }
     }
 
-    // 氏名・クラス・出席番号・部活動の補完（表2または大名簿から）
+    // 表1形式（氏名、ふりがな、英字ローマ字の取得）
+    if (r.length >= 12 && String(r[0] || "").trim() === code) {
+      const nVal = String(r[1] || "").trim();
+      if (nVal && !item.name) {
+        item.name = nVal.replace(/[\s　]+/g, " ");
+        item.cleanName = nVal.replace(/[\s　]+/g, "");
+      }
+      if (!item.kana && r[2]) item.kana = String(r[2]).trim();
+      if (!item.juniorHigh && r[8]) item.juniorHigh = String(r[8]).trim();
+      if (!item.address && r[11]) item.address = String(r[11]).trim();
+
+      // ローマ字（姓・名 2段形式: 例 "Ito\nMasato"）
+      const lastEn = String(r[5] || "").trim();
+      const firstEn = String(r[6] || "").trim();
+      if (lastEn && firstEn) {
+        item.romaji = `${lastEn}\n${firstEn}`;
+      } else if (r[4]) {
+        const parts = String(r[4]).trim().split(/\s+/);
+        item.romaji = parts.length >= 2 ? `${parts[1]}\n${parts[0]}` : parts[0];
+      }
+    }
+
+    // 表2形式（クラス、出席番号、部活）
     if (r.length >= 9 && String(r[3] || "").trim() === code) {
       let clsVal = String(r[4] || "").trim().replace("1G1", "1-1").replace("1G2", "1-2").replace("1G3", "1-3")
                                             .replace("2G1", "2-1").replace("2G2", "2-2").replace("2G3", "2-3");
@@ -273,16 +605,15 @@ function parseStrict209Students(rawRows) {
       if (r[7] && !item.club) item.club = getFullClubName(String(r[7]).trim());
     }
 
-    // 表1形式（先頭がコードの行）のフォールバック
-    if (r.length >= 12 && String(r[0] || "").trim() === code) {
-      const nameVal = String(r[1] || "").trim();
-      if (nameVal && !item.name) {
-        item.name = nameVal.replace(/[\s　]+/g, " ");
-        item.cleanName = nameVal.replace(/[\s　]+/g, "");
+    // 表3形式（大名簿からのローマ字・部屋番号補完）
+    if (r.length > 55 && String(r[27] || "").trim() === code) {
+      if (!item.romaji) {
+        const lastEn = String(r[55] || "").trim();
+        const firstEn = String(r[53] || "").trim();
+        if (lastEn && firstEn) item.romaji = `${lastEn}\n${firstEn}`;
       }
-      if (!item.kana && r[2]) item.kana = String(r[2]).trim();
-      if (!item.juniorHigh && r[8]) item.juniorHigh = String(r[8]).trim();
-      if (!item.address && r[11]) item.address = String(r[11]).trim();
+      const rm = String(r[92] || "").trim();
+      if (!item.room && rm && rm !== "-") item.room = rm;
     }
   });
 
@@ -296,6 +627,10 @@ function parseStrict209Students(rawRows) {
     if (!item.no) item.no = resultList.length + 1;
     item.id = `${item.cls}_${String(item.no).padStart(2, '0')}`;
     item.club = getFullClubName(item.club);
+    // ローマ字が空の場合はふりがなからヘボン式ローマ字を生成（ひらがな表示防止）
+    if (!item.romaji && item.kana) {
+      item.romaji = kanaToRomaji(item.kana);
+    }
     if (item.name) resultList.push(item);
   });
 
@@ -308,9 +643,9 @@ function onRosterLoaded() {
   updateFilterSelectors();
   initSeatAssignments();
   renderPreview();
+  saveRosterToCloud();
 }
 
-// ================= 写真登録・照合 =================
 function handlePhotoFiles(files, targetStore, countElId) {
   let count = 0;
   Array.from(files).forEach(f => {
@@ -479,6 +814,14 @@ function getTargetStudentsForSeating() {
   const mode = document.getElementById('seatGroupingMode').value;
   if (mode === 'single') {
     const targetCls = (document.getElementById('seatClassSelect').value || '').trim().toUpperCase();
+    if (targetCls === '3MW') {
+      const list3M = students.filter(s => (s.cls || '').trim().toUpperCase() === '3M').sort((a, b) => a.no - b.no);
+      const list3W = students.filter(s => (s.cls || '').trim().toUpperCase() === '3W').sort((a, b) => a.no - b.no);
+      return [...list3M, ...list3W].map((s, idx) => ({
+        ...s,
+        displayNo: idx + 1
+      }));
+    }
     return students.filter(s => (s.cls || '').trim().toUpperCase() === targetCls);
   } else if (mode === 'combined') {
     const selected = Array.from(document.getElementById('seatCombinedSelect').selectedOptions).map(o => o.value.trim().toUpperCase());
@@ -582,32 +925,39 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.getElementById('seatControls').style.display = (currentTab === 'seat') ? 'flex' : 'none';
     document.getElementById('rollcallControls').style.display = (currentTab === 'rollcall') ? 'flex' : 'none';
     document.getElementById('diaryControls').style.display = (currentTab === 'diaries') ? 'flex' : 'none';
+    const originCtl = document.getElementById('originControls');
+    if (originCtl) originCtl.style.display = (currentTab === 'origin') ? 'flex' : 'none';
 
     const genControls = document.getElementById('generalControls');
     const gradeBox = document.getElementById('gradeFilterBox');
     const classBox = document.getElementById('classFilterBox');
     const sizeBox = document.getElementById('sizeSelectorBox');
     const sizeSel = document.getElementById('sizeSelector');
+    const photoAdjustBox = document.getElementById('photoAdjustBox');
 
     if (currentTab === 'photo') {
       genControls.style.display = 'flex';
       gradeBox.style.display = 'flex';
       classBox.style.display = 'flex';
       sizeBox.style.display = 'flex';
+      if (photoAdjustBox) photoAdjustBox.style.display = 'flex';
       sizeSel.innerHTML = PHOTO_SIZES.map((s, idx) => `<option value="${idx}">${s.name}</option>`).join('');
     } else if (currentTab === 'plate_locker') {
       genControls.style.display = 'flex';
       gradeBox.style.display = 'flex';
       classBox.style.display = 'flex';
       sizeBox.style.display = 'flex';
+      if (photoAdjustBox) photoAdjustBox.style.display = 'none';
       sizeSel.innerHTML = LOCKER_PLATE_SIZES.map((s, idx) => `<option value="${idx}">${s.name}</option>`).join('');
-    } else if (currentTab === 'attendance' || currentTab === 'plate_dorm' || currentTab === 'origin') {
+    } else if (currentTab === 'attendance' || currentTab === 'plate_dorm') {
       genControls.style.display = 'flex';
       gradeBox.style.display = 'flex';
       classBox.style.display = 'flex';
       sizeBox.style.display = 'none';
+      if (photoAdjustBox) photoAdjustBox.style.display = 'none';
     } else {
       genControls.style.display = 'none';
+      if (photoAdjustBox) photoAdjustBox.style.display = 'none';
     }
 
     renderPreview();
@@ -622,8 +972,14 @@ document.getElementById('sizeSelector').addEventListener('change', renderPreview
 function renderPreview() {
   const container = document.getElementById('preview-area');
   if (students.length === 0 && currentTab !== 'diaries') {
-    container.innerHTML = `<div class="empty-state"><p>生徒名簿ファイル（CSV / Excel）をアップロードしてください。</p></div>`;
+    container.innerHTML = `<div class="empty-state"><p>生徒名簿ファイル（CSV / Excel）を上部からアップロードしてください。</p></div>`;
     return;
+  }
+
+  if (['plate_locker', 'plate_dorm', 'photo', 'attendance', 'origin'].includes(currentTab)) {
+    document.body.classList.add('multi-page-mode');
+  } else {
+    document.body.classList.remove('multi-page-mode');
   }
 
   switch (currentTab) {
@@ -654,9 +1010,9 @@ function renderPreview() {
   }
 }
 
-// 1. 座席表（写真下枠極小・空席非表示・A4縦1枚収容）
+// 1. 座席表（原本PDF完全準拠：写真3:4比率、縦書き漢字氏名、横一列英字氏名＋出席番号、フッター）
 function renderSeatingChart(container) {
-  const roomName = document.getElementById('classroomPresetSelect').value || "座席表";
+  const roomName = document.getElementById('classroomPresetSelect')?.value || "座席表";
   const roomObj = PRESET_CLASSROOMS.find(r => r.name === roomName);
 
   if (roomObj && roomObj.isGroupStudy) {
@@ -664,16 +1020,18 @@ function renderSeatingChart(container) {
     return;
   }
 
-  const cols = parseInt(document.getElementById('seatCols').value) || 5;
-  const rows = parseInt(document.getElementById('seatRows').value) || 5;
+  const cols = parseInt(document.getElementById('seatCols')?.value) || 5;
+  const currentClass = document.getElementById('seatClassSelect')?.value || "1-1";
+  const classDisplayName = CLASS_DISPLAY_NAMES[currentClass] || currentClass;
+  const teacherName = CLASS_TEACHERS[currentClass] || "　　　";
 
   let html = `
-    <div class="seating-chart">
-      <div class="seating-header-block">
-        <div class="seating-room-title">${roomName}</div>
-        <div class="seating-sub-info">座席表（出席簿用）</div>
+    <div class="pdf-style-seating-wrapper a4-fit-container">
+      <div class="pdf-header-bar">
+        <div class="pdf-header-year">2026年度</div>
+        <div class="pdf-header-title">座席表</div>
       </div>
-      <div class="seating-grid-container" style="grid-template-columns: repeat(${cols}, 1fr);">
+      <div class="pdf-seating-grid" style="grid-template-columns: repeat(${cols}, 1fr);">
   `;
 
   seatAssignments.forEach((slotData, idx) => {
@@ -681,19 +1039,37 @@ function renderSeatingChart(container) {
     const isSelected = selectedSlotForSwap === idx ? "selected-swap" : "";
 
     if (!s) {
-      // 空席は非表示（透明化・枠なし）
-      html += `<div class="seat-slot empty-seat" style="visibility:hidden; border:none;"></div>`;
+      html += `<div class="pdf-seat-card empty-seat" style="visibility:hidden; border:none;"></div>`;
     } else {
       const photo = getPhoto(s);
+      const romaji = (s.romaji || kanaToRomaji(s.kana)).replace(/[\n\r\s　]+/g, ' ').trim();
+
       html += `
-        <div class="seat-slot ${isSelected}" draggable="true" onclick="handleSeatClick(${idx})" ondragstart="handleDragStart(event, ${idx})" ondragover="handleDragOver(event)" ondrop="handleDrop(event, ${idx})">
-          <div class="seat-photo-box">
-            ${photo ? `<img class="seat-photo" src="${photo}">` : `<div class="no-photo">写真</div>`}
+        <div class="pdf-seat-card ${isSelected}" 
+             draggable="true" 
+             onclick="handleSeatClick(${idx})" 
+             ondragstart="handleDragStart(event, ${idx})" 
+             ondragover="handleDragOver(event)" 
+             drop="handleDrop(event, ${idx})">
+          
+          <div class="pdf-seat-top">
+            <div class="pdf-seat-photo-box">
+              ${photo ? `<img class="pdf-seat-photo" src="${photo}">` : `<div class="pdf-no-photo">写真</div>`}
+            </div>
+            <div class="pdf-seat-vertical-name">
+              <span>${s.name}</span>
+            </div>
           </div>
-          <!-- 写真下枠極小表示（クラス名なし・番号＋氏名のみ） -->
-          <div class="seat-info-tiny">
-            <span class="seat-name-compact">${s.no}. ${s.name}</span>
+
+          <div class="pdf-seat-bottom">
+            <div class="pdf-seat-romaji">
+              <span>${romaji}</span>
+            </div>
+            <div class="pdf-seat-number">
+              ${s.displayNo !== undefined ? s.displayNo : s.no}
+            </div>
           </div>
+
         </div>
       `;
     }
@@ -701,7 +1077,11 @@ function renderSeatingChart(container) {
 
   html += `
       </div>
-      <div class="podium-box">教 卓</div>
+      <div class="pdf-footer-bar">
+        <div class="pdf-footer-class">${classDisplayName}</div>
+        <div class="pdf-podium-box">教　　卓</div>
+        <div class="pdf-footer-teacher">担任: ${teacherName}</div>
+      </div>
     </div>
   `;
   container.innerHTML = html;
@@ -709,10 +1089,10 @@ function renderSeatingChart(container) {
 
 function renderGroupStudySeating(container, roomName) {
   let html = `
-    <div class="seating-chart">
-      <div class="seating-header-block">
-        <div class="seating-room-title">${roomName}</div>
-        <div class="seating-sub-info">座席表（3×3グループ学習 / 各島6名対面）</div>
+    <div class="pdf-style-seating-wrapper a4-fit-container">
+      <div class="pdf-header-bar">
+        <div class="pdf-header-year">2026年度</div>
+        <div class="pdf-header-title">座席表</div>
       </div>
       <div class="group-islands-grid">
   `;
@@ -749,29 +1129,40 @@ function renderGroupStudySeating(container, roomName) {
 
   html += `
       </div>
-      <div class="podium-box">教 卓</div>
+      <div class="pdf-footer-bar">
+        <div class="pdf-footer-class">特別教室（グループ学習）</div>
+        <div class="pdf-podium-box">教　　卓</div>
+        <div class="pdf-footer-teacher"></div>
+      </div>
     </div>
   `;
   container.innerHTML = html;
 }
 
-// 2. 生徒名簿（出席簿原本書式準拠・Q, V, AG, CG列完全引用・番地省略）
+// 2. 生徒名簿（表題「生徒名簿」、クラス名・担任名を併記、長い中学校名は縮小）
 function renderAttendanceSheet(container) {
+  const targetClass = document.getElementById('generalClassFilter')?.value || "1-1";
+  const classDisplayName = CLASS_DISPLAY_NAMES[targetClass] || (targetClass === "ALL" ? "全校生徒" : targetClass);
+  const teacherName = CLASS_TEACHERS[targetClass] || "　　　";
   const list = getFilteredStudents();
 
   let html = `
     <div class="attendance-sheet-wrapper">
-      <div class="attendance-header">
-        <div style="font-size:14pt; font-weight:bold;">生徒名簿（出席簿）</div>
-        <div>対象人数: ${list.length}名</div>
+      <div class="attendance-header" style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px; border-bottom:2px solid #333; padding-bottom:4px;">
+        <div style="display:flex; align-items:baseline; gap:16px;">
+          <div style="font-size:16pt; font-weight:bold;">生徒名簿</div>
+          <div style="font-size:12pt; font-weight:bold; color:#1e3a8a;">${classDisplayName}</div>
+          <div style="font-size:11pt;">担任: <strong>${teacherName}</strong></div>
+        </div>
+        <div style="font-size:10pt;">対象人数: ${list.length}名</div>
       </div>
       <table class="attendance-table">
         <thead>
           <tr>
             <th style="width:40px;">番号</th>
             <th style="width:110px;">氏名</th>
-            <th style="width:130px;">ふりがな</th>
-            <th style="width:100px;">出身中学</th>
+            <th style="width:120px;">ふりがな</th>
+            <th style="width:130px;">出身中学</th>
             <th>帰省先住所</th>
             <th style="width:90px;">部活動</th>
             <th style="width:100px;">委員会</th>
@@ -781,12 +1172,13 @@ function renderAttendanceSheet(container) {
   `;
 
   list.forEach(s => {
+    const isLong = (s.juniorHigh || '').length >= 9;
     html += `
       <tr>
-        <td>${s.no}</td>
-        <td style="font-weight:bold; font-size:10.5pt;">${s.name}</td>
-        <td style="font-size:8.5pt;">${s.kana || '-'}</td>
-        <td>${s.juniorHigh || '-'}</td>
+        <td>${s.displayNo !== undefined ? s.displayNo : s.no}</td>
+        <td style="font-weight:bold; font-size:10pt;">${s.name}</td>
+        <td style="font-size:8pt;">${s.kana || '-'}</td>
+        <td class="${isLong ? 'school-long-text' : ''}">${s.juniorHigh || '-'}</td>
         <td style="text-align:left; font-size:8.5pt;">${getShortAddress(s.address)}</td>
         <td>${s.club || '-'}</td>
         <td>${s.committee || '-'}</td>
@@ -798,11 +1190,16 @@ function renderAttendanceSheet(container) {
   container.innerHTML = html;
 }
 
-// 3. 寮生点呼簿（週間記録・CJ寮生抽出・CW部屋番号・フロア別ソート＆A4印刷）
+// 3. 寮生点呼簿（1-301, 1-302の管理棟非表示、ダッシュボードに部活名追加）
 function renderRollCallSystem(container) {
   const filter = document.getElementById('dormFilterSelect').value;
 
-  let list = students.filter(s => s.room && s.room !== '-');
+  let list = students.filter(s => {
+    if (!s.room || s.room === '-') return false;
+    const rm = s.room.trim();
+    if (rm === '1-301' || rm === '1-302' || rm.includes('管理')) return false;
+    return true;
+  });
   list.sort((a, b) => (a.room || '').localeCompare(b.room || '', undefined, { numeric: true }));
 
   if (filter !== 'ALL') {
@@ -824,7 +1221,9 @@ function renderRollCallSystem(container) {
   } else {
     chipContainer.innerHTML = absents.map(a => `
       <span class="absent-chip">
-        <strong>${a.student.name}</strong> (${a.student.cls} / ${a.student.room}) - <span style="color:#d32f2f; font-weight:bold;">${a.status}</span> ${a.note ? `[${a.note}]` : ''}
+        <strong>${a.student.name}</strong> (${a.student.cls} / ${a.student.room}) 
+        <span style="color:#0284c7; font-weight:bold;">[${a.student.club || '部活無'}]</span> - 
+        <span style="color:#d32f2f; font-weight:bold;">${a.status}</span> ${a.note ? `[${a.note}]` : ''}
       </span>
     `).join('');
   }
@@ -938,7 +1337,7 @@ document.getElementById('rollcallWeekDate')?.addEventListener('change', (e) => {
 document.getElementById('dormFilterSelect')?.addEventListener('change', renderPreview);
 document.getElementById('btnPrintFloorRollCall')?.addEventListener('click', () => window.print());
 
-// 4. ロッカー用ネームプレート（名前のみ枠いっぱいに表示・正確なA4実寸）
+// 4. ロッカー用ネームプレート
 function renderLockerPlates(container) {
   const spec = LOCKER_PLATE_SIZES[document.getElementById('sizeSelector').value || 0];
   const list = getFilteredStudents();
@@ -955,7 +1354,7 @@ function renderLockerPlates(container) {
   container.innerHTML = html;
 }
 
-// 5. ネームプレート（寮 4×3cm：写真面積8割以上、縦書き氏名、下部横並び）
+// 5. ネームプレート（寮 4×3cm）
 function renderDormPhotoPlates(container) {
   const list = getFilteredStudents();
 
@@ -981,7 +1380,7 @@ function renderDormPhotoPlates(container) {
   container.innerHTML = html;
 }
 
-// 6. 証明写真印刷（名前を写真枠外に配置しカット時正確寸法維持）
+// 6. 証明写真印刷（微調整スライダー連動）
 function renderPhotoSheet(container) {
   const spec = PHOTO_SIZES[document.getElementById('sizeSelector').value || 0];
   const list = getFilteredStudents();
@@ -991,10 +1390,10 @@ function renderPhotoSheet(container) {
     const photo = getPhoto(s, true);
     html += `
       <div class="photo-item-container">
-        <div class="photo-card" style="width:${spec.w}mm; height:${spec.h}mm;">
-          ${photo ? `<img src="${photo}">` : `<div class="no-photo">写真なし</div>`}
+        <div class="photo-card" style="width:${spec.w}mm; height:${spec.h}mm; overflow:hidden;">
+          ${photo ? `<img src="${photo}" style="transform: scale(${photoScale}); object-position: center ${photoOffsetY}%;">` : `<div class="no-photo">写真なし</div>`}
         </div>
-        <div class="photo-external-label" style="width:${spec.w}mm;">${s.cls}-${s.no} ${s.name}</div>
+        <div class="photo-external-label" style="width:${spec.w}mm;">${s.cls}-${s.displayNo !== undefined ? s.displayNo : s.no} ${s.name}</div>
       </div>
     `;
   });
@@ -1002,7 +1401,7 @@ function renderPhotoSheet(container) {
   container.innerHTML = html;
 }
 
-// 7. 各種日誌（過去閲覧機能付き）
+// 7. 各種日誌（日直・宿直・保健室）
 window.switchDiaryType = function(type) {
   currentDiaryType = type;
   document.querySelectorAll('.diary-subtab').forEach(b => b.classList.remove('active'));
@@ -1018,9 +1417,15 @@ function getWeekday(dateStr) {
   return days[d.getDay()] || '';
 }
 
-function renderStudentOptionList() {
+function renderStudentOptionList(selectedId = "") {
   return `<option value="">-- 生徒を選択 --</option>` +
-    students.map(s => `<option value="${s.id}">${s.name} (${s.cls} / ${s.room || '寮室無'})</option>`).join('');
+    students.map(s => `<option value="${s.id}" ${s.id === selectedId ? 'selected' : ''}>${s.name} (${s.cls} / ${s.room || '寮室無'} / ${s.club || '部活無'})</option>`).join('');
+}
+
+function getStudentsInRoom(roomNo) {
+  if (!roomNo) return "生徒なし";
+  const matched = students.filter(s => s.room === roomNo).map(s => s.name);
+  return matched.length > 0 ? matched.join('・') : "該当生徒なし";
 }
 
 function updateDiaryHistorySelect() {
@@ -1050,7 +1455,6 @@ document.getElementById('btnSaveDiary')?.addEventListener('click', () => {
 });
 
 function renderDiariesTab(container) {
-  const studentOptions = renderStudentOptionList();
   const period = document.getElementById('diarySummaryPeriod')?.value || 'single';
 
   if (period !== 'single') {
@@ -1061,7 +1465,6 @@ function renderDiariesTab(container) {
   if (currentDiaryType === 'day') {
     const d = currentDiary.day;
     const weekday = getWeekday(d.date);
-    const selStudent = students.find(s => s.id === d.isolationStudentId);
 
     container.innerHTML = `
       <div class="diary-paper">
@@ -1086,14 +1489,14 @@ function renderDiariesTab(container) {
             <th>学校</th>
             <td>
               <select onchange="currentDiary.day.schoolType=this.value">
-                <option value="休日" selected>休日</option>
-                <option value="登校日">登校日</option>
-                <option value="寮閉鎖">寮閉鎖</option>
+                <option value="休日" ${d.schoolType==='休日'?'selected':''}>休日</option>
+                <option value="登校日" ${d.schoolType==='登校日'?'selected':''}>登校日</option>
+                <option value="寮閉鎖" ${d.schoolType==='寮閉鎖'?'selected':''}>寮閉鎖</option>
               </select>
             </td>
           </tr>
           <tr>
-            <th>寮内巡回 (5回)</th>
+            <th>寮内巡回</th>
             <td colspan="3">
               <div style="display:flex; gap:6px; flex-wrap:wrap;">
                 ${[0,1,2,3,4].map(i => `
@@ -1103,7 +1506,7 @@ function renderDiariesTab(container) {
             </td>
           </tr>
           <tr>
-            <th>校内巡回 (5回)</th>
+            <th>校内巡回</th>
             <td colspan="3">
               <div style="display:flex; gap:6px; flex-wrap:wrap;">
                 ${[0,1,2,3,4].map(i => `
@@ -1125,18 +1528,33 @@ function renderDiariesTab(container) {
             <td colspan="3"><textarea rows="2" onchange="currentDiary.day.special=this.value" placeholder="検定試験・行事等">${d.special}</textarea></td>
           </tr>
           <tr>
-            <th>隔離・療養</th>
+            <th>隔離・療養生徒</th>
             <td colspan="3">
-              <div style="margin-bottom:6px;">
-                <select onchange="currentDiary.day.isolationStudentId=this.value; renderPreview();">${studentOptions}</select>
-                <span style="margin-left:12px;">体温: <input type="text" value="${d.isolationTemp}" onchange="currentDiary.day.isolationTemp=this.value" style="width:60px;" placeholder="36.5"> ℃</span>
-              </div>
-              ${selStudent ? `
-                <div style="background:#f8fafc; padding:6px; border:1px solid #e2e8f0; margin-bottom:6px; font-size:9pt;">
-                  <strong>${selStudent.name}</strong> ｜ クラス: ${selStudent.cls} ｜ 部屋: ${selStudent.room || '-'} ｜ 部活: ${selStudent.club || '-'} ｜ 住所: ${getPrefCity(selStudent.address)}
-                </div>
-              ` : ''}
-              <textarea rows="2" onchange="currentDiary.day.isolationReason=this.value" placeholder="病状・経過・通院状況を記入">${d.isolationReason}</textarea>
+              ${(d.isolatedStudents || []).map((item, idx) => {
+                const sel = students.find(s => s.id === item.studentId);
+                return `
+                  <div style="margin-bottom:8px; border-bottom:1px dashed #cbd5e1; padding-bottom:6px;">
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                      生徒: <select onchange="currentDiary.day.isolatedStudents[${idx}].studentId=this.value; renderPreview();">${renderStudentOptionList(item.studentId)}</select>
+                      所在: <select onchange="currentDiary.day.isolatedStudents[${idx}].location=this.value;">
+                        <option value="自室" ${item.location==='自室'?'selected':''}>自室</option>
+                        <option value="保健室" ${item.location==='保健室'?'selected':''}>保健室</option>
+                        <option value="隔離" ${item.location==='隔離'?'selected':''}>隔離</option>
+                        <option value="自宅" ${item.location==='自宅'?'selected':''}>自宅</option>
+                      </select>
+                      体温: <input type="text" value="${item.temp}" onchange="currentDiary.day.isolatedStudents[${idx}].temp=this.value;" style="width:50px;"> ℃
+                      理由・病状: <input type="text" value="${item.reason}" onchange="currentDiary.day.isolatedStudents[${idx}].reason=this.value;" style="width:40%;">
+                      <button class="btn btn-sm btn-danger-outline" onclick="currentDiary.day.isolatedStudents.splice(${idx}, 1); renderPreview();">削除</button>
+                    </div>
+                    ${sel ? `
+                      <div style="background:#f8fafc; padding:4px 8px; border-radius:4px; margin-top:4px; font-size:9pt; color:#475569;">
+                        <strong>${sel.name}</strong> ｜ クラス: ${sel.cls} ｜ 部屋: ${sel.room || '-'} ｜ 部活: ${sel.club || '-'} ｜ 住所: ${getPrefCity(sel.address)}
+                      </div>
+                    ` : ''}
+                  </div>
+                `;
+              }).join('')}
+              <button class="btn btn-sm btn-light" onclick="currentDiary.day.isolatedStudents.push({studentId:'', location:'隔離', temp:'', reason:''}); renderPreview();">＋ 隔離生徒を追加</button>
             </td>
           </tr>
         </table>
@@ -1145,6 +1563,9 @@ function renderDiariesTab(container) {
   } else if (currentDiaryType === 'night') {
     const d = currentDiary.night;
     const weekday = getWeekday(d.date);
+
+    // 部屋リスト（ユニーク）
+    const roomList = Array.from(new Set(students.map(s => s.room).filter(r => r && r !== '-'))).sort();
 
     container.innerHTML = `
       <div class="diary-paper">
@@ -1177,7 +1598,11 @@ function renderDiariesTab(container) {
           </tr>
           <tr>
             <th>寮着時間</th>
-            <td><input type="text" value="${d.arriveTime}" onchange="currentDiary.night.arriveTime=this.value" placeholder="16:20"></td>
+            <td>
+              <select onchange="currentDiary.night.arriveTime=this.value" style="font-size:11px;">
+                ${["15:45", "16:00", "16:15", "16:20", "16:30", "16:45", "17:00"].map(t => `<option value="${t}" ${d.arriveTime===t?'selected':''}>${t}</option>`).join('')}
+              </select>
+            </td>
             <th>最終退勤/最初出勤</th>
             <td>退勤: <input type="text" value="${d.lastLeave}" onchange="currentDiary.night.lastLeave=this.value" style="width:90px;"> / 出勤: <input type="text" value="${d.firstArrive}" onchange="currentDiary.night.firstArrive=this.value" style="width:90px;"></td>
           </tr>
@@ -1186,18 +1611,41 @@ function renderDiariesTab(container) {
             <td colspan="3"><input type="text" value="${d.rollcallStatus}" onchange="currentDiary.night.rollcallStatus=this.value" style="width:90%;"></td>
           </tr>
           <tr>
-            <th>寮内巡回 (5回)</th>
+            <th>寮内巡回</th>
             <td colspan="3">
-              <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
                 ${[0,1,2,3,4].map(i => `
-                  <span>${['①','②','③','④','⑤'][i]} <input type="text" value="${d.patrols[i]}" onchange="currentDiary.night.patrols[${i}]=this.value" style="width:100px;"></span>
+                  <span>${['①','②','③','④','⑤'][i]} 
+                    <select onchange="currentDiary.night.patrols[${i}]=this.value" style="font-size:11px;">
+                      <option value="">--</option>
+                      ${["20:00～20:30", "21:00～21:30", "21:45～22:10", "22:30～23:00", "23:30～24:00", "6:00～6:30"].map(t => `<option value="${t}" ${d.patrols[i]===t?'selected':''}>${t}</option>`).join('')}
+                    </select>
+                  </span>
                 `).join('')}
               </div>
             </td>
           </tr>
           <tr>
-            <th>事務当番 / 外出</th>
-            <td colspan="3">事務当番: <input type="text" value="${d.officeDuty}" onchange="currentDiary.night.officeDuty=this.value" style="width:140px;"> &nbsp; 外出報告: <input type="text" value="${d.outReport}" onchange="currentDiary.night.outReport=this.value" style="width:140px;"></td>
+            <th>事務当番 / 外出報告</th>
+            <td colspan="3">
+              <div style="display:flex; flex-direction:column; gap:6px;">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <span>事務当番（部屋選択）:</span>
+                  <select onchange="currentDiary.night.officeRoom=this.value; renderPreview();">
+                    <option value="">-- 部屋選択 --</option>
+                    ${roomList.map(r => `<option value="${r}" ${d.officeRoom===r?'selected':''}>${r}</option>`).join('')}
+                  </select>
+                  <span>担当生徒: <strong>${getStudentsInRoom(d.officeRoom)}</strong></span>
+                  <input type="text" value="${d.officeDuty || ''}" onchange="currentDiary.night.officeDuty=this.value" placeholder="特記事項（机当番等）" style="width:140px;">
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:4px;">
+                  <span>外出報告:</span>
+                  <input type="number" value="${d.outCount || 0}" style="width:55px;" onchange="currentDiary.night.outCount=this.value">
+                  <span>名の申告・帰寮報告あり</span>
+                  <input type="text" value="${d.outReport || ''}" onchange="currentDiary.night.outReport=this.value" placeholder="外出に関する備考・特記" style="flex:1;">
+                </div>
+              </div>
+            </td>
           </tr>
           <tr>
             <th>緊急在寮 / 残食 / 検食 / バス</th>
@@ -1210,13 +1658,10 @@ function renderDiariesTab(container) {
                 const sel = students.find(s => s.id === item.studentId);
                 return `
                   <div style="margin-bottom:6px; border-bottom:1px dashed #ccc; padding-bottom:4px;">
-                    <select onchange="currentDiary.night.sickList[${idx}].studentId=this.value; renderPreview();">
-                      <option value="">-- 生徒を選択 --</option>
-                      ${students.map(s => `<option value="${s.id}" ${s.id===item.studentId?'selected':''}>${s.name} (${s.cls} / ${s.room||'-'})</option>`).join('')}
-                    </select>
+                    <select onchange="currentDiary.night.sickList[${idx}].studentId=this.value; renderPreview();">${renderStudentOptionList(item.studentId)}</select>
                     体温: <input type="text" value="${item.temp}" onchange="currentDiary.night.sickList[${idx}].temp=this.value" style="width:50px;"> ℃
                     ${sel ? `<span>[部屋: ${sel.room||'-'} / 部活: ${sel.club||'-'} / 住所: ${getPrefCity(sel.address)}]</span>` : ''}
-                    <input type="text" value="${item.condition}" onchange="currentDiary.night.sickList[${idx}].condition=this.value" style="width:40%;" placeholder="症状・自宅療養/隔離">
+                    <input type="text" value="${item.condition}" onchange="currentDiary.night.sickList[${idx}].condition=this.value" style="width:35%;" placeholder="症状・自宅療養/隔離">
                   </div>
                 `;
               }).join('')}
@@ -1256,13 +1701,24 @@ function renderDiariesTab(container) {
             <td colspan="3">
               ${d.absenceItems.map((item, idx) => {
                 const sel = students.find(s => s.id === item.studentId);
+                const badgeClass = item.type === '欠席' ? 'health-type-absent' : (item.type === '遅刻' ? 'health-type-late' : 'health-type-early');
                 return `
-                  <div style="margin-bottom:6px; border-bottom:1px dashed #ccc; padding-bottom:4px;">
-                    区分: <select onchange="currentDiary.health.absenceItems[${idx}].type=this.value"><option value="欠席" ${item.type==='欠席'?'selected':''}>欠席</option><option value="遅刻" ${item.type==='遅刻'?'selected':''}>遅刻</option><option value="早退" ${item.type==='早退'?'selected':''}>早退</option></select>
-                    生徒: <select onchange="currentDiary.health.absenceItems[${idx}].studentId=this.value; renderPreview();"><option value="">-- 選択 --</option>${students.map(s => `<option value="${s.id}" ${s.id===item.studentId?'selected':''}>${s.name} (${s.cls})</option>`).join('')}</select>
-                    体温: <input type="text" value="${item.temp}" onchange="currentDiary.health.absenceItems[${idx}].temp=this.value" style="width:50px;"> ℃
-                    ${sel ? `<span>[部屋: ${sel.room||'-'} / 部活: ${sel.club||'-'} / 住所: ${getPrefCity(sel.address)}]</span>` : ''}
-                    <input type="text" value="${item.symptom}" onchange="currentDiary.health.absenceItems[${idx}].symptom=this.value" style="width:35%;" placeholder="症状・経過">
+                  <div class="health-entry-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                      <span class="health-type-badge ${badgeClass}">${item.type}</span>
+                      <button class="btn btn-sm btn-danger-outline" onclick="currentDiary.health.absenceItems.splice(${idx}, 1); renderPreview();">削除</button>
+                    </div>
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                      区分: <select onchange="currentDiary.health.absenceItems[${idx}].type=this.value; renderPreview();"><option value="欠席" ${item.type==='欠席'?'selected':''}>欠席</option><option value="遅刻" ${item.type==='遅刻'?'selected':''}>遅刻</option><option value="早退" ${item.type==='早退'?'selected':''}>早退</option></select>
+                      生徒: <select onchange="currentDiary.health.absenceItems[${idx}].studentId=this.value; renderPreview();">${renderStudentOptionList(item.studentId)}</select>
+                      体温: <input type="text" value="${item.temp}" onchange="currentDiary.health.absenceItems[${idx}].temp=this.value" style="width:50px;"> ℃
+                      症状・経過: <input type="text" value="${item.symptom}" onchange="currentDiary.health.absenceItems[${idx}].symptom=this.value" style="width:40%;">
+                    </div>
+                    ${sel ? `
+                      <div style="font-size:9pt; color:#64748b; margin-top:4px;">
+                        ${sel.cls} | 部屋: ${sel.room || '-'} | 部活: ${sel.club || '-'} | 出身: ${getPrefCity(sel.address)}
+                      </div>
+                    ` : ''}
                   </div>
                 `;
               }).join('')}
@@ -1275,11 +1731,21 @@ function renderDiariesTab(container) {
               ${d.visitorItems.map((item, idx) => {
                 const sel = students.find(s => s.id === item.studentId);
                 return `
-                  <div style="margin-bottom:6px; border-bottom:1px dashed #ccc; padding-bottom:4px;">
-                    生徒: <select onchange="currentDiary.health.visitorItems[${idx}].studentId=this.value; renderPreview();"><option value="">-- 選択 --</option>${students.map(s => `<option value="${s.id}" ${s.id===item.studentId?'selected':''}>${s.name} (${s.cls})</option>`).join('')}</select>
-                    体温: <input type="text" value="${item.temp}" onchange="diaryData.health.visitorItems[${idx}].temp=this.value" style="width:50px;"> ℃
-                    ${sel ? `<span>[部屋: ${sel.room||'-'} / 部活: ${sel.club||'-'}]</span>` : ''}
-                    <input type="text" value="${item.reason}" onchange="diaryData.health.visitorItems[${idx}].reason=this.value" style="width:40%;" placeholder="処置・理由">
+                  <div class="health-entry-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                      <strong>来室 #${idx + 1}</strong>
+                      <button class="btn btn-sm btn-danger-outline" onclick="currentDiary.health.visitorItems.splice(${idx}, 1); renderPreview();">削除</button>
+                    </div>
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                      生徒: <select onchange="currentDiary.health.visitorItems[${idx}].studentId=this.value; renderPreview();">${renderStudentOptionList(item.studentId)}</select>
+                      体温: <input type="text" value="${item.temp}" onchange="currentDiary.health.visitorItems[${idx}].temp=this.value" style="width:50px;"> ℃
+                      処置・理由: <input type="text" value="${item.reason}" onchange="currentDiary.health.visitorItems[${idx}].reason=this.value" style="width:45%;">
+                    </div>
+                    ${sel ? `
+                      <div style="font-size:9pt; color:#64748b; margin-top:4px;">
+                        ${sel.cls} | 部屋: ${sel.room || '-'} | 部活: ${sel.club || '-'}
+                      </div>
+                    ` : ''}
                   </div>
                 `;
               }).join('')}
@@ -1342,7 +1808,7 @@ function renderDiarySummary(container, period) {
   container.innerHTML = html;
 }
 
-// 8. 出身地別名簿
+// 8. 出身地別名簿（委員会列追加、茨城県公式44市町村順最優先、他県JIS順、CSV出力＆印刷）
 function renderOriginSheet(container) {
   const groups = {};
   students.forEach(s => {
@@ -1351,21 +1817,80 @@ function renderOriginSheet(container) {
     groups[reg].push(s);
   });
 
-  let html = `<div class="attendance-sheet-wrapper"><div class="attendance-header"><div style="font-size:14pt; font-weight:bold;">出身地別名簿</div></div>`;
-  for (const reg in groups) {
+  const sortedKeys = Object.keys(groups).sort((a, b) => {
+    const isAIbaraki = a.includes("茨城") || IBARAKI_MUNICIPALITIES_ORDER.some(m => a.includes(m));
+    const isBIbaraki = b.includes("茨城") || IBARAKI_MUNICIPALITIES_ORDER.some(m => b.includes(m));
+
+    if (isAIbaraki && !isBIbaraki) return -1;
+    if (!isAIbaraki && isBIbaraki) return 1;
+
+    if (isAIbaraki && isBIbaraki) {
+      let idxA = IBARAKI_MUNICIPALITIES_ORDER.findIndex(m => a.includes(m));
+      let idxB = IBARAKI_MUNICIPALITIES_ORDER.findIndex(m => b.includes(m));
+      if (idxA === -1) idxA = 999;
+      if (idxB === -1) idxB = 999;
+      return idxA - idxB;
+    }
+
+    let prefA = PREFECTURES_JIS_ORDER.findIndex(p => a.startsWith(p));
+    let prefB = PREFECTURES_JIS_ORDER.findIndex(p => b.startsWith(p));
+    return prefA - prefB;
+  });
+
+  let html = `<div class="attendance-sheet-wrapper"><div class="attendance-header"><div style="font-size:16pt; font-weight:bold;">出身地別名簿</div><div>対象人数: ${students.length}名</div></div>`;
+  sortedKeys.forEach(reg => {
     html += `
-      <h4 style="margin:12px 0 4px;border-left:4px solid #1e3a8a;padding-left:8px;">${reg} (${groups[reg].length}名)</h4>
+      <h4 style="margin:14px 0 4px; border-left:4px solid #1e3a8a; padding-left:8px;">${reg} (${groups[reg].length}名)</h4>
       <table class="attendance-table">
-        <thead><tr><th style="width:60px;">組-番</th><th style="width:120px;">氏名</th><th>帰省先住所</th><th style="width:90px;">部活動</th></tr></thead>
+        <thead>
+          <tr>
+            <th style="width:60px;">組-番</th>
+            <th style="width:110px;">氏名</th>
+            <th>帰省先住所</th>
+            <th style="width:90px;">部活動</th>
+            <th style="width:100px;">委員会</th>
+          </tr>
+        </thead>
         <tbody>
-          ${groups[reg].map(s => `<tr><td>${s.cls}-${s.no}</td><td style="font-weight:bold;">${s.name}</td><td style="text-align:left;">${getShortAddress(s.address)}</td><td>${s.club || '-'}</td></tr>`).join('')}
+          ${groups[reg].map(s => `<tr><td>${s.cls}-${s.displayNo !== undefined ? s.displayNo : s.no}</td><td style="font-weight:bold;">${s.name}</td><td style="text-align:left;">${getShortAddress(s.address)}</td><td>${s.club || '-'}</td><td>${s.committee || '-'}</td></tr>`).join('')}
         </tbody>
       </table>
     `;
-  }
+  });
   html += `</div>`;
   container.innerHTML = html;
 }
+
+// 出身地別名簿 スプレッドシート用CSV出力
+document.getElementById('btnExportOriginCSV')?.addEventListener('click', () => {
+  const exportData = [];
+  students.forEach(s => {
+    exportData.push({
+      "地域・市町村": getPrefCity(s.address),
+      "クラス": s.cls,
+      "出席番号": s.no,
+      "氏名": s.name,
+      "帰省先住所": s.address,
+      "部活動": s.club,
+      "委員会": s.committee
+    });
+  });
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  downloadBomCsv(`出身地別名簿_スプレッドシート用_${today}.csv`, Papa.unparse(exportData));
+});
+
+// 写真微調整スライダー
+document.getElementById('photoScaleSlider')?.addEventListener('input', (e) => {
+  photoScale = parseFloat(e.target.value);
+  document.getElementById('photoScaleVal').innerText = `${Math.round(photoScale * 100)}%`;
+  renderPreview();
+});
+
+document.getElementById('photoOffsetYSlider')?.addEventListener('input', (e) => {
+  photoOffsetY = parseInt(e.target.value);
+  document.getElementById('photoOffsetYVal').innerText = `${photoOffsetY}%`;
+  renderPreview();
+});
 
 function getFilteredStudents() {
   const grade = document.getElementById('generalGradeFilter').value;
@@ -1378,101 +1903,276 @@ function getFilteredStudents() {
   });
 }
 
-document.getElementById('btnExportRollCallCSV')?.addEventListener('click', () => {
-  const exportData = students.map(s => {
-    const rec = rollCallRecords[s.id] || { status: '在寮', note: '' };
-    return {
-      '部屋': s.room || '',
-      'クラス': s.cls,
-      '出席番号': s.no,
-      '氏名': s.name,
-      '部活動': s.club,
-      '点呼状態': rec.status,
-      '不在理由メモ': rec.note
-    };
-  });
-  downloadBomCsv(`寮生点呼簿_${currentRollCallDate}.csv`, Papa.unparse(exportData));
-});
+// ================= 教員マスター & Google SSO アクセスガード =================
+let allowedTeachers = new Set([SUPER_ADMIN_EMAIL.toLowerCase()]);
 
-document.getElementById('btnExportDiaryCSV')?.addEventListener('click', () => {
-  const rows = [];
-  ['day', 'night', 'health'].forEach(t => {
-    const st = savedDiaries[t] || {};
-    Object.keys(st).forEach(dt => {
-      rows.push({ タイプ: t, 日付: dt, データ: JSON.stringify(st[dt]) });
+// 1. 教員名簿（CSV / Excel）の取り込み処理
+document.getElementById('teacherFile')?.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const ext = file.name.split('.').pop().toLowerCase();
+  const handleRows = async (rows) => {
+    let count = 0;
+    const teacherList = [];
+
+    rows.forEach(r => {
+      if (!r || r.length === 0) return;
+      let email = null;
+      let name = "";
+      r.forEach((cell, idx) => {
+        const val = String(cell || "").trim();
+        if (/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(val)) {
+          email = val.toLowerCase();
+        } else if (!name && val.length >= 2 && !/^\d+$/.test(val) && idx < 5) {
+          name = val;
+        }
+      });
+
+      if (email) {
+        allowedTeachers.add(email);
+        teacherList.push({ email, name });
+        count++;
+      }
     });
-  });
-  downloadBomCsv(`学校日誌データ一括_${new Date().toISOString().slice(0,10)}.csv`, Papa.unparse(rows));
+
+    try {
+      const batch = writeBatch(db);
+      teacherList.forEach(t => {
+        const docId = t.email.replace(/[.@]/g, '_');
+        const refDoc = doc(db, 'teachers', docId);
+        batch.set(refDoc, t);
+      });
+      await batch.commit();
+    } catch (err) {
+      console.warn("Firestore教員保存通知:", err);
+    }
+
+    localStorage.setItem('allowed_teachers', JSON.stringify(Array.from(allowedTeachers)));
+    
+    const badge = document.getElementById('teacherCount');
+    if (badge) {
+      badge.innerText = `教員: ${allowedTeachers.size}名 登録済`;
+      badge.classList.add('badge-ok');
+    }
+    alert(`教員 ${count} 名のメールアドレスを登録・承認しました。`);
+    checkUserAccess(auth.currentUser);
+  };
+
+  if (ext === 'csv') {
+    Papa.parse(file, { header: false, complete: (res) => handleRows(res.data) });
+  } else {
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const wb = XLSX.read(new Uint8Array(evt.target.result), { type: 'array' });
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+      handleRows(rows);
+    };
+    reader.readAsArrayBuffer(file);
+  }
 });
 
-function downloadBomCsv(filename, content) {
-  const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
-  const blob = new Blob([bom, content], { type: 'text/csv;charset=utf-8;' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
+// 2. 登録済み教員リストの初期ロード
+async function loadAllowedTeachers() {
+  const cached = localStorage.getItem('allowed_teachers');
+  if (cached) {
+    try {
+      JSON.parse(cached).forEach(em => allowedTeachers.add(em.toLowerCase()));
+    } catch (e) {}
+  }
+
+  try {
+    const snap = await getDocs(collection(db, 'teachers'));
+    snap.forEach(d => {
+      const data = d.data();
+      if (data.email) allowedTeachers.add(data.email.toLowerCase());
+    });
+    localStorage.setItem('allowed_teachers', JSON.stringify(Array.from(allowedTeachers)));
+  } catch (err) {
+    console.log("Firestore教員一覧取得通知:", err);
+  }
+
+  const badge = document.getElementById('teacherCount');
+  if (badge) {
+    badge.innerText = `教員: ${allowedTeachers.size}名 登録済`;
+    if (allowedTeachers.size > 1) badge.classList.add('badge-ok');
+  }
 }
 
-window.handleSeatClick = function(index) {
-  if (selectedSlotForSwap === null) {
-    selectedSlotForSwap = index;
-    renderPreview();
+// 3. SSOログイン状態 & 利用資格チェック
+function checkUserAccess(user) {
+  const overlay = document.getElementById('authLockOverlay');
+  const lockMsg = document.getElementById('authLockMsg');
+  const userStatus = document.getElementById('userStatus');
+  const authBtn = document.getElementById('authBtn');
+
+  if (!user) {
+    if (overlay) overlay.style.display = 'flex';
+    if (lockMsg) lockMsg.innerHTML = `本システムは登録された教員アカウント（Google SSO）のみご利用いただけます。<br>学校のGoogleアカウントでログインしてください。`;
+    if (userStatus) userStatus.innerText = "未ログイン";
+    if (authBtn) authBtn.innerText = "ログイン";
+    return;
+  }
+
+  const userEmail = (user.email || "").toLowerCase();
+  if (userStatus) userStatus.innerText = userEmail;
+  if (authBtn) authBtn.innerText = "ログアウト";
+
+  const isAdmin = (userEmail === SUPER_ADMIN_EMAIL.toLowerCase() || adminTeachers.has(userEmail));
+  const adminBar = document.getElementById('adminBar');
+  if (adminBar) adminBar.style.display = isAdmin ? 'block' : 'none';
+
+  const assignBtn = document.getElementById('btnAssignAdmin');
+  if (assignBtn) {
+    assignBtn.style.display = (userEmail === SUPER_ADMIN_EMAIL.toLowerCase()) ? 'inline-flex' : 'none';
+  }
+
+  if (allowedTeachers.has(userEmail) || isAdmin) {
+    if (overlay) overlay.style.display = 'none';
   } else {
-    const temp = seatAssignments[selectedSlotForSwap].student;
-    seatAssignments[selectedSlotForSwap].student = seatAssignments[index].student;
-    seatAssignments[index].student = temp;
-    selectedSlotForSwap = null;
-    renderPreview();
+    if (overlay) overlay.style.display = 'flex';
+    if (lockMsg) lockMsg.innerHTML = `<span style="color:#ef4444; font-weight:bold;">【アクセス拒否】</span><br>アカウント <strong>${userEmail}</strong> は教員名簿に登録されていません。<br>管理者に登録を依頼するか、承認された教員アカウントでログインし直してください。`;
   }
-};
+}
 
-window.handleDragStart = function(e, index) { dragSourceIndex = index; };
-window.handleDragOver = function(e) { e.preventDefault(); };
-window.handleDrop = function(e, targetIndex) {
-  e.preventDefault();
-  if (dragSourceIndex !== null && dragSourceIndex !== targetIndex) {
-    const temp = seatAssignments[dragSourceIndex].student;
-    seatAssignments[dragSourceIndex].student = seatAssignments[targetIndex].student;
-    seatAssignments[targetIndex].student = temp;
-    dragSourceIndex = null;
-    renderPreview();
+// 4. 認証イベントの監視
+onAuthStateChanged(auth, (user) => {
+  checkUserAccess(user);
+});
+
+// ログイン・ログアウトボタン動作
+document.getElementById('authBtn')?.addEventListener('click', () => {
+  if (auth.currentUser) {
+    signOut(auth).then(() => checkUserAccess(null));
+  } else {
+    signInWithPopup(auth, googleProvider).catch((e) => alert("ログインエラー: " + e.message));
   }
-};
+});
 
-// ================= イマーシブ・全画面モード制御 =================
+document.getElementById('lockLoginBtn')?.addEventListener('click', () => {
+  signInWithPopup(auth, googleProvider).catch((e) => alert("ログインエラー: " + e.message));
+});
+
+
+// ================= 名簿クリア & 雛形/ユーザーリスト ダウンロード =================
+document.getElementById('btnClearStudent')?.addEventListener('click', () => {
+  if (!confirm("読み込まれている生徒名簿データをクリアしますか？\n※座席表や名簿の表示がリセットされます。")) return;
+  students = [];
+  seatAssignments = [];
+  const fileInput = document.getElementById('rosterFile');
+  if (fileInput) fileInput.value = '';
+  const badge = document.getElementById('rosterCount');
+  if (badge) {
+    badge.innerText = '生徒: 0名';
+    badge.classList.remove('badge-ok');
+  }
+  renderPreview();
+  try {
+    const docRef = doc(db, 'system_data', 'roster_master');
+    setDoc(docRef, { students: [], seatAssignments: [], updatedAt: new Date().toISOString() });
+  } catch (e) {}
+  alert("生徒名簿データをクリアしました。");
+});
+
+document.getElementById('btnClearTeacher')?.addEventListener('click', () => {
+  if (!confirm("登録済みの教員名簿をクリアしますか？\n※管理者アカウントのみ有効な状態に戻ります。")) return;
+  allowedTeachers = new Set([SUPER_ADMIN_EMAIL.toLowerCase()]);
+  localStorage.removeItem('allowed_teachers');
+  const fileInput = document.getElementById('teacherFile');
+  if (fileInput) fileInput.value = '';
+  const badge = document.getElementById('teacherCount');
+  if (badge) {
+    badge.innerText = `教員: 1名 (管理者)`;
+    badge.classList.remove('badge-ok');
+  }
+  alert("教員名簿をクリアしました（管理者のみ有効）。");
+  checkUserAccess(auth.currentUser);
+});
+
+document.getElementById('btnDownloadStudentTpl')?.addEventListener('click', () => {
+  const sample = [
+    {
+      "学籍番号": "2026001",
+      "氏名": "日専 太郎",
+      "ふりがな": "にっせん たろう",
+      "英字氏名": "Nissen\nTaro",
+      "クラス": "1-1",
+      "出席番号": "1",
+      "出身中学": "日立第一中学校",
+      "帰省先住所": "茨城県日立市幸町1丁目",
+      "部活動": "野球",
+      "委員会": "体育委員",
+      "部屋番号": "2-301"
+    },
+    {
+      "学籍番号": "2026002",
+      "氏名": "技術 花子",
+      "ふりがな": "ぎじゅつ はなこ",
+      "英字氏名": "Gijutsu\nHanako",
+      "クラス": "1-1",
+      "出席番号": "2",
+      "出身中学": "助川中学校",
+      "帰省先住所": "茨城県日立市助川町2丁目",
+      "部活動": "吹奏楽",
+      "委員会": "図書委員",
+      "部屋番号": "1-102"
+    }
+  ];
+  downloadBomCsv("生徒名簿_雛形.csv", Papa.unparse(sample));
+});
+
+document.getElementById('btnDownloadStudentList')?.addEventListener('click', () => {
+  if (students.length === 0) {
+    alert("現在読み込まれている生徒名簿データがありません。");
+    return;
+  }
+  const exportData = students.map(s => ({
+    "学籍番号": s.studentCode || "",
+    "クラス": s.cls || "",
+    "出席番号": s.no || "",
+    "氏名": s.name || "",
+    "ふりがな": s.kana || "",
+    "英字氏名": (s.romaji || "").replace(/\n/g, " "),
+    "出身中学": s.juniorHigh || "",
+    "帰省先住所": s.address || "",
+    "部活動": s.club || "",
+    "委員会": s.committee || "",
+    "部屋番号": s.room || ""
+  }));
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  downloadBomCsv(`生徒名簿_ユーザーリスト_${today}.csv`, Papa.unparse(exportData));
+});
+
+document.getElementById('btnDownloadTeacherTpl')?.addEventListener('click', () => {
+  const sample = [
+    { "氏名": "遠島 充", "メールアドレス": "mitsuru.toshima@hitachi-tech.ac.jp", "役職": "管理者" },
+    { "氏名": "小室 尚子", "メールアドレス": "komuro@example.ac.jp", "役職": "教員" },
+    { "氏名": "竹井 勇佑", "メールアドレス": "takei@example.ac.jp", "役職": "教員" }
+  ];
+  downloadBomCsv("教員名簿_雛形.csv", Papa.unparse(sample));
+});
+
+document.getElementById('btnDownloadTeacherList')?.addEventListener('click', () => {
+  const exportData = Array.from(allowedTeachers).map(email => ({
+    "メールアドレス": email,
+    "種別": email === SUPER_ADMIN_EMAIL.toLowerCase() ? "管理者" : "教員"
+  }));
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  downloadBomCsv(`登録教員リスト_${today}.csv`, Papa.unparse(exportData));
+});
+
+document.getElementById('btnAssignAdmin')?.addEventListener('click', () => {
+  const email = prompt("管理者に指名する教員のメールアドレスを入力してください：");
+  if (!email) return;
+  adminTeachers.add(email.trim().toLowerCase());
+  localStorage.setItem('admin_teachers', JSON.stringify(Array.from(adminTeachers)));
+  alert(`教員「${email}」を管理者に指名しました。`);
+});
+
+
+
+// ================= 表示拡大率 (ズーム) コントロール =================
 let currentZoom = 1.0;
-
-function toggleImmersiveMode() {
-  document.body.classList.toggle('immersive-mode');
-  
-  if (document.body.classList.contains('immersive-mode')) {
-    if (document.documentElement.requestFullscreen) {
-      document.documentElement.requestFullscreen().catch(() => {});
-    }
-  } else {
-    if (document.exitFullscreen && document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    }
-  }
-}
-
-document.getElementById('immersiveBtn')?.addEventListener('click', toggleImmersiveMode);
-document.getElementById('floatingImmersiveExitBtn')?.addEventListener('click', toggleImmersiveMode);
-
-document.getElementById('toggleControlsBtn')?.addEventListener('click', () => {
-  const panel = document.getElementById('controlsContainer');
-  if (panel) {
-    panel.style.display = (panel.style.display === 'none') ? 'block' : 'none';
-  }
-});
-
-window.toggleSection = function(id) {
-  const el = document.getElementById(id);
-  if (el) {
-    el.style.display = (el.style.display === 'none') ? 'flex' : 'none';
-  }
-};
 
 function applyZoom(delta) {
   if (delta === 0) currentZoom = 1.0;
@@ -1480,7 +2180,10 @@ function applyZoom(delta) {
 
   const wrapper = document.getElementById('previewZoomWrapper');
   const label = document.getElementById('zoomLevelLabel');
-  if (wrapper) wrapper.style.transform = `scale(${currentZoom})`;
+  if (wrapper) {
+    wrapper.style.transform = `scale(${currentZoom})`;
+    wrapper.style.transformOrigin = 'top center';
+  }
   if (label) label.innerText = `${Math.round(currentZoom * 100)}%`;
 }
 
@@ -1488,8 +2191,70 @@ document.getElementById('btnZoomIn')?.addEventListener('click', () => applyZoom(
 document.getElementById('btnZoomOut')?.addEventListener('click', () => applyZoom(-0.1));
 document.getElementById('btnZoomReset')?.addEventListener('click', () => applyZoom(0));
 
-window.addEventListener('DOMContentLoaded', () => {
-  initPresets();
-  document.getElementById('rollcallWeekDate').value = currentRollCallDate;
-  updateDiaryHistorySelect();
+
+// 教員数バッジクリックで登録済み教員一覧を表示
+document.getElementById('teacherCount')?.addEventListener('click', () => {
+  const teacherArr = Array.from(allowedTeachers);
+  if (teacherArr.length === 0) {
+    alert("登録されている教員はありません。");
+    return;
+  }
+  const lines = teacherArr.map((em, idx) => {
+    const isSuper = em === SUPER_ADMIN_EMAIL.toLowerCase();
+    const isAdmin = adminTeachers.has(em);
+    const role = isSuper ? "【特権管理者】" : (isAdmin ? "【管理者】" : "【一般教員】");
+    return `${idx + 1}. ${em} ${role}`;
+  }).join('\n');
+  alert(`【登録済み教員一覧（計 ${teacherArr.length} 名）】\n\n` + lines);
 });
+
+
+// ================= 写真データのローカルキャッシュ永続化 =================
+function savePhotosToCache() {
+  try {
+    const keys = Object.keys(photoStore);
+    if (keys.length === 0) return;
+    localStorage.setItem('cached_photo_keys', JSON.stringify(keys.slice(0, 50)));
+    // save each photo
+    keys.slice(0, 50).forEach(k => {
+      try { localStorage.setItem('photo_' + k, photoStore[k]); } catch(e){}
+    });
+  } catch(e) {
+    console.warn("写真キャッシュ容量超過通知:", e);
+  }
+}
+
+function loadPhotosFromCache() {
+  try {
+    const keys = JSON.parse(localStorage.getItem('cached_photo_keys') || '[]');
+    let loaded = 0;
+    keys.forEach(k => {
+      const data = localStorage.getItem('photo_' + k);
+      if (data) { photoStore[k] = data; loaded++; }
+    });
+    if (loaded > 0) {
+      const pCount = document.getElementById('photoCount');
+      if (pCount) {
+        pCount.innerText = `写真: ${loaded}枚 (保存済)`;
+        pCount.classList.add('badge-ok');
+      }
+    }
+  } catch(e){}
+}
+
+function initializeApp() {
+  initPresets();
+  updateFilterSelectors();
+  const rollcallDateEl = document.getElementById('rollcallWeekDate');
+  if (rollcallDateEl) rollcallDateEl.value = currentRollCallDate;
+  updateDiaryHistorySelect();
+  loadAllowedTeachers();
+  loadRosterFromCloud();
+  loadPhotosFromCache();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initializeApp);
+} else {
+  initializeApp();
+}
